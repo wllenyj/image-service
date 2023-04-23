@@ -259,9 +259,12 @@ impl Merger {
                         Ok(())
                     },
                 )?;
+
+                /*
                 for node in &nodes {
                     tree.apply(node, true, WhiteoutSpec::Oci)?;
                 }
+                 */
             } else {
                 tree = Some(Tree::from_bootstrap(&rs, &mut ())?);
             }
@@ -277,15 +280,15 @@ impl Merger {
         }
 
         // Safe to unwrap because there is at least one source bootstrap.
-        let tree = tree.unwrap();
+        let mut tree = tree.unwrap();
         ctx.fs_version = fs_version;
         if let Some(chunk_size) = chunk_size {
             ctx.chunk_size = chunk_size;
         }
 
         let mut bootstrap_ctx = BootstrapContext::new(Some(target.clone()), false)?;
-        let mut bootstrap = Bootstrap::new()?;
-        bootstrap.build(ctx, &mut bootstrap_ctx, tree)?;
+        let mut bootstrap = Bootstrap::new(tree)?;
+        bootstrap.build(ctx, &mut bootstrap_ctx)?;
         let blob_table = blob_mgr.to_blob_table(ctx)?;
         let mut bootstrap_storage = Some(target.clone());
         bootstrap

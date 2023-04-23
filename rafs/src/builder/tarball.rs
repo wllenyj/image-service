@@ -282,7 +282,7 @@ impl<'a> TarballTreeBuilder<'a> {
             assert!(!targets.is_empty());
             let mut tmp_tree: &Tree = tree;
             for name in &targets[1..] {
-                match tmp_tree.get_child_idx(name) {
+                match tmp_tree.get_child_idx(name.as_bytes()) {
                     Some(idx) => tmp_tree = &tmp_tree.children[idx],
                     None => {
                         bail!(
@@ -445,7 +445,7 @@ impl<'a> TarballTreeBuilder<'a> {
         } else {
             let mut tmp_tree = tree;
             for idx in 1..target_paths.len() {
-                match tmp_tree.get_child_idx(&target_paths[idx]) {
+                match tmp_tree.get_child_idx(target_paths[idx].as_bytes()) {
                     Some(i) => {
                         if idx == target_paths_len - 1 {
                             tmp_tree.children[i].set_node(node);
@@ -456,11 +456,11 @@ impl<'a> TarballTreeBuilder<'a> {
                     }
                     None => {
                         if idx == target_paths_len - 1 {
-                            tmp_tree.children.push(Tree::new(node));
+                            tmp_tree.insert_child(Tree::new(node));
                             break;
                         } else {
                             let node = self.create_directory(&target_paths[..=idx])?;
-                            tmp_tree.children.push(Tree::new(node));
+                            tmp_tree.insert_child(Tree::new(node));
                             let last_idx = tmp_tree.children.len() - 1;
                             tmp_tree = &mut tmp_tree.children[last_idx];
                         }

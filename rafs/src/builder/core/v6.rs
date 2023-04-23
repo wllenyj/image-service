@@ -159,20 +159,18 @@ impl Node {
         let mut d_size = 0;
 
         // Sort all children if "." and ".." are not at the head after sorting.
-        if !tree.children.is_empty() && tree.children[0].name < *".." {
+        if !tree.children.is_empty() && tree.children[0].name() < "..".as_bytes() {
             let mut children = Vec::with_capacity(tree.children.len() + 2);
-            let dot = OsString::from(".");
-            let dotdot = OsString::from("..");
-            children.push(dot.as_os_str());
-            children.push(dotdot.as_os_str());
+            children.push(".".as_bytes());
+            children.push("..".as_bytes());
             for child in tree.children.iter() {
-                children.push(&child.name);
+                children.push(child.name());
             }
             children.sort_unstable();
 
             for c in children {
                 // Use length in byte, instead of length in character.
-                let len = c.as_bytes().len() + size_of::<RafsV6Dirent>();
+                let len = c.len() + size_of::<RafsV6Dirent>();
                 // erofs disk format requires dirent to be aligned to block size.
                 if (d_size % block_size) + len as u64 > block_size {
                     d_size = round_up(d_size as u64, block_size);
@@ -187,7 +185,7 @@ impl Node {
                 + "..".as_bytes().len()
                 + size_of::<RafsV6Dirent>()) as u64;
             for child in tree.children.iter() {
-                let len = child.name.as_bytes().len() + size_of::<RafsV6Dirent>();
+                let len = child.name().len() + size_of::<RafsV6Dirent>();
                 // erofs disk format requires dirent to be aligned to block size.
                 if (d_size % block_size) + len as u64 > block_size {
                     d_size = round_up(d_size as u64, block_size);
@@ -604,7 +602,7 @@ impl Bootstrap {
             let child_node = child.lock_node();
             let entry = (
                 child_node.v6_offset,
-                child.name.to_os_string(),
+                OsStr::from_bytes(child.name()).to_owned(),
                 child_node.inode.mode(),
             );
             node.v6_dirents.push(entry);

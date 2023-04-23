@@ -593,12 +593,12 @@ impl BlobCompactor {
             return Ok(None);
         }
         let mut _dict = HashChunkDict::new(build_ctx.digester);
-        let tree = Tree::from_bootstrap(&rs, &mut _dict)?;
-        let mut bootstrap = Bootstrap::new()?;
-        bootstrap.build(&mut build_ctx, &mut bootstrap_ctx, tree)?;
+        let mut tree = Tree::from_bootstrap(&rs, &mut _dict)?;
+        let mut bootstrap = Bootstrap::new(tree)?;
+        bootstrap.build(&mut build_ctx, &mut bootstrap_ctx)?;
         let mut nodes = VecDeque::new();
         // move out nodes
-        std::mem::swap(&mut bootstrap_ctx.nodes, &mut nodes);
+        //std::mem::swap(&mut bootstrap_ctx.nodes, &mut nodes);
         let mut compactor = Self::new(
             build_ctx.fs_version,
             ori_blob_mgr,
@@ -614,7 +614,7 @@ impl BlobCompactor {
         }
         info!("compact blob successfully");
         // give back nodes
-        std::mem::swap(&mut bootstrap_ctx.nodes, &mut compactor.nodes);
+        //std::mem::swap(&mut bootstrap_ctx.nodes, &mut compactor.nodes);
         // blobs have already been dumped, dump bootstrap only
         let blob_table = compactor.new_blob_mgr.to_blob_table(&build_ctx)?;
         bootstrap.dump(

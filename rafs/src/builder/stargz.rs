@@ -38,6 +38,8 @@ use crate::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode};
 use crate::metadata::layout::RafsXAttrs;
 use crate::metadata::{Inode, RafsVersion};
 
+pub(crate) const STARGZ_DEFAULT_BLOCK_SIZE: u32 = 4 << 20;
+
 type RcTocEntry = Rc<RefCell<TocEntry>>;
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
@@ -443,7 +445,9 @@ impl StargzTreeBuilder {
                 node.inode.set_child_count(chunks.len() as u32);
                 node.chunks = chunks.to_vec();
             }
+            /*
             tree.apply(node, false, ctx.whiteout_spec)?;
+             */
         }
 
         Ok(tree)
@@ -655,7 +659,6 @@ impl StargzTreeBuilder {
 
         Ok(Node {
             info: Arc::new(info),
-            index: 0,
             overlay: Overlay::UpperAddition,
             inode,
             chunks: Vec::new(),
@@ -703,7 +706,8 @@ impl StargzBuilder {
         // Ensure that the chunks in the blob meta are sorted by uncompressed_offset
         // and ordered by chunk index so that they can be found quickly at runtime
         // with a binary search.
-        let mut blob_chunks = Vec::new();
+        let mut blob_chunks: Vec<NodeChunk> = Vec::new();
+        /*
         for node in &bootstrap_ctx.nodes {
             if node.overlay.is_lower_layer() || node.inode.has_hardlink() {
                 continue;
@@ -712,6 +716,7 @@ impl StargzBuilder {
                 blob_chunks.push(chunk.clone());
             }
         }
+         */
         blob_chunks.sort_unstable_by(|a, b| {
             a.inner
                 .uncompressed_offset()
@@ -760,6 +765,7 @@ impl StargzBuilder {
         let blob_index = blob_mgr.alloc_index()?;
         let mut uncompressed_blob_size = 0u64;
         let mut compressed_blob_size = 0u64;
+        /*
         for node in &mut bootstrap_ctx.nodes {
             if node.overlay.is_lower_layer() {
                 continue;
@@ -808,6 +814,7 @@ impl StargzBuilder {
                 node.inode.set_digest(digest);
             }
         }
+        */
 
         blob_ctx.uncompressed_blob_size = uncompressed_blob_size;
         blob_ctx.compressed_blob_size = compressed_blob_size;
@@ -838,7 +845,7 @@ impl Builder for StargzBuilder {
         };
 
         // Build filesystem tree from the stargz TOC.
-        let tree = timing_tracer!({ self.build_tree(ctx, layer_idx) }, "build_tree")?;
+        let mut tree = timing_tracer!({ self.build_tree(ctx, layer_idx) }, "build_tree")?;
         let mut bootstrap =
             build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree)?;
 

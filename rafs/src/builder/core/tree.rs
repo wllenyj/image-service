@@ -16,7 +16,8 @@
 //!   lower tree (MetadataTree).
 //! - Traverse the merged tree (OverlayTree) to dump bootstrap and data blobs.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -41,7 +42,7 @@ pub struct Tree {
     /// Filesystem node.
     pub node: TreeNode,
     /// Cached base name.
-    pub name: OsString,
+    name: Vec<u8>,
     /// Children tree nodes.
     pub children: Vec<Tree>,
 }
@@ -49,7 +50,7 @@ pub struct Tree {
 impl Tree {
     /// Create a new instance of `Tree` from a filesystem node.
     pub fn new(node: Node) -> Self {
-        let name = node.name().to_owned();
+        let name = node.name().as_bytes().to_vec();
         Tree {
             node: Arc::new(Mutex::new(node)),
             name,
@@ -71,6 +72,11 @@ impl Tree {
         )?;
 
         Ok(tree)
+    }
+
+    /// Get name of the tree node.
+    pub fn name(&self) -> &[u8] {
+        &self.name
     }
 
     /// Set `Node` associated with the tree node.
@@ -145,21 +151,26 @@ impl Tree {
         Ok(())
     }
 
+    /// Insert a new child node into the tree.
+    pub fn insert_child(&mut self, child: Tree) {
+        if let Err(idx) = self
+            .children
+            .binary_search_by_key(&&child.name, |n| &n.name)
+        {
+            self.children.insert(idx, child);
+        }
+    }
+
     /// Get index of child node with specified `name`.
     #[allow(clippy::manual_find)]
-    pub fn get_child_idx(&self, name: &OsStr) -> Option<usize> {
-        for idx in 0..self.children.len() {
-            if self.children[idx].name == name {
-                return Some(idx);
-            }
-        }
-        None
+    pub fn get_child_idx(&self, name: &[u8]) -> Option<usize> {
+        self.children.binary_search_by_key(&name, |n| &n.name).ok()
     }
 
     /// Merge the upper layer tree into the lower layer tree, applying whiteout rules.
     pub fn merge_overaly(&mut self, ctx: &BuildContext, upper: Tree) -> Result<()> {
-        assert_eq!(self.name, *"/");
-        assert_eq!(upper.name, *"/");
+        assert_eq!(self.name, "/".as_bytes());
+        assert_eq!(upper.name, "/".as_bytes());
 
         // Handle the root node.
         upper.lock_node().overlay = Overlay::UpperModification;
@@ -176,7 +187,7 @@ impl Tree {
             match u_node.whiteout_type(ctx.whiteout_spec) {
                 Some(WhiteoutType::OciRemoval) => {
                     if let Some(origin_name) = u_node.origin_name(WhiteoutType::OciRemoval) {
-                        if let Some(idx) = self.get_child_idx(origin_name) {
+                        if let Some(idx) = self.get_child_idx(origin_name.as_bytes()) {
                             self.children.remove(idx);
                         }
                     }
@@ -210,7 +221,7 @@ impl Tree {
                 self.children[idx].node = u.node.clone();
             } else {
                 u_node.overlay = Overlay::UpperAddition;
-                self.children.push(Tree {
+                self.insert_child(Tree {
                     node: u.node.clone(),
                     name: u.name.clone(),
                     children: vec![],
@@ -433,7 +444,7 @@ mod tests {
         )
         .unwrap();
         let tree2 = Tree::new(node);
-        tree.children.push(tree2);
+        tree.insert_child(tree2);
 
         let tmpfile3 = TempFile::new_in(tmpdir.as_path()).unwrap();
         let node = Node::from_fs_object(
@@ -447,7 +458,7 @@ mod tests {
         )
         .unwrap();
         let tree3 = Tree::new(node);
-        tree.children.push(tree3);
+        tree.insert_child(tree3);
 
         let mut count = 0;
         tree.walk_bfs(true, &mut |_n| -> bool {
@@ -474,12 +485,12 @@ mod tests {
         assert_eq!(count, 1);
 
         assert_eq!(
-            tree.get_child_idx(tmpfile2.as_path().file_name().unwrap())
+            tree.get_child_idx(tmpfile2.as_path().file_name().unwrap().as_bytes())
                 .unwrap(),
             0
         );
         assert_eq!(
-            tree.get_child_idx(tmpfile3.as_path().file_name().unwrap())
+            tree.get_child_idx(tmpfile3.as_path().file_name().unwrap().as_bytes())
                 .unwrap(),
             1
         );
