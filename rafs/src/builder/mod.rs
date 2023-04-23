@@ -20,7 +20,7 @@ pub use self::core::feature::{Feature, Features};
 pub use self::core::node::{ChunkSource, NodeChunk};
 pub use self::core::overlay::{Overlay, WhiteoutSpec};
 pub use self::core::prefetch::{Prefetch, PrefetchPolicy};
-pub use self::core::tree::{MetadataTreeBuilder, Tree};
+pub use self::core::tree::{MetadataTreeBuilder, Tree, TreeNode};
 pub use self::directory::DirectoryBuilder;
 pub use self::merge::Merger;
 pub use self::stargz::StargzBuilder;
@@ -50,23 +50,15 @@ fn build_bootstrap(
     blob_mgr: &mut BlobManager,
     mut tree: Tree,
 ) -> Result<Bootstrap> {
-    let mut bootstrap = Bootstrap::new()?;
-    // Merge with lower layer if there's one.
+    // For multi-layer build, merge the upper layer and lower layer with overlay whiteout applied.
     if bootstrap_ctx.layered {
-        let origin_bootstarp_offset = bootstrap_ctx.offset;
-        // Disable prefetch and bootstrap.apply() will reset the prefetch enable/disable flag.
-        ctx.prefetch.disable();
-        bootstrap.build(ctx, bootstrap_ctx, tree)?;
-        tree = bootstrap.apply(ctx, bootstrap_ctx, bootstrap_mgr, blob_mgr, None)?;
-        bootstrap_ctx.offset = origin_bootstarp_offset;
-        bootstrap_ctx.layered = false;
+        let mut parent = Bootstrap::load_parent_bootstrap(ctx, bootstrap_mgr, blob_mgr)?;
+        timing_tracer!({ parent.merge_overaly(ctx, tree) }, "merge_bootstrap")?;
+        tree = parent;
     }
 
-    // Convert the hierarchy tree into an array, stored in `bootstrap_ctx.nodes`.
-    timing_tracer!(
-        { bootstrap.build(ctx, bootstrap_ctx, tree) },
-        "build_bootstrap"
-    )?;
+    let mut bootstrap = Bootstrap::new(tree)?;
+    timing_tracer!({ bootstrap.build(ctx, bootstrap_ctx) }, "build_bootstrap")?;
 
     Ok(bootstrap)
 }
@@ -79,8 +71,8 @@ fn dump_bootstrap(
     blob_mgr: &mut BlobManager,
     blob_writer: &mut ArtifactWriter,
 ) -> Result<()> {
+    // Make sure blob id is updated according to blob hash if not specified by user.
     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-        // Make sure blob id is updated according to blob hash if not specified by user.
         if blob_ctx.blob_id.is_empty() {
             // `Blob::dump()` should have set `blob_ctx.blob_id` to referenced OCI tarball for
             // ref-type conversion.
@@ -99,13 +91,10 @@ fn dump_bootstrap(
 
     // Dump bootstrap file
     let blob_table = blob_mgr.to_blob_table(ctx)?;
-    bootstrap.dump(
-        ctx,
-        &mut bootstrap_mgr.bootstrap_storage,
-        bootstrap_ctx,
-        &blob_table,
-    )?;
+    let storage = &mut bootstrap_mgr.bootstrap_storage;
+    bootstrap.dump(ctx, storage, bootstrap_ctx, &blob_table)?;
 
+    // Dump RAFS meta to data blob if inline meta is enabled.
     if ctx.blob_inline_meta {
         assert_ne!(ctx.conversion_type, ConversionType::TarToTarfs);
         // Ensure the blob object is created in case of no chunks generated for the blob.

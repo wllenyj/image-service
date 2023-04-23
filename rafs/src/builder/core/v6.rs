@@ -3,7 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::SeekFrom;
 use std::mem::size_of;
@@ -580,8 +580,8 @@ impl BuildContext {
 }
 
 impl Bootstrap {
-    pub(crate) fn v6_update_dirents(nodes: &mut VecDeque<Node>, tree: &Tree, parent_offset: u64) {
-        let node = &mut nodes[tree.node.index as usize - 1];
+    pub(crate) fn v6_update_dirents(parent: &Tree, parent_offset: u64) {
+        let mut node = parent.lock_node();
         let node_offset = node.v6_offset;
         if !node.is_dir() {
             return;
@@ -600,20 +600,15 @@ impl Bootstrap {
         }
 
         let mut dirs: Vec<&Tree> = Vec::new();
-        for child in tree.children.iter() {
-            trace!(
-                "{:?} child {:?} offset {}, mode {}",
-                node.name(),
-                child.name,
-                child.node.v6_offset,
-                child.node.inode.mode()
-            );
-            node.v6_dirents.push((
-                child.node.v6_offset,
+        for child in parent.children.iter() {
+            let child_node = child.lock_node();
+            let entry = (
+                child_node.v6_offset,
                 child.name.to_os_string(),
-                child.node.inode.mode(),
-            ));
-            if child.node.is_dir() {
+                child_node.inode.mode(),
+            );
+            node.v6_dirents.push(entry);
+            if child_node.is_dir() {
                 dirs.push(child);
             }
         }
@@ -621,7 +616,7 @@ impl Bootstrap {
             .sort_unstable_by(|a, b| a.1.as_os_str().cmp(b.1.as_os_str()));
 
         for dir in dirs {
-            Self::v6_update_dirents(nodes, dir, node_offset);
+            Self::v6_update_dirents(dir, node_offset);
         }
     }
 
@@ -660,13 +655,14 @@ impl Bootstrap {
             blob_table_size
         );
 
+        let fs_prefetch_rule_count = ctx.prefetch.fs_prefetch_rule_count();
         let (prefetch_table_offset, prefetch_table_size) =
             // If blob_table_size equal to 0, there is no prefetch.
-            if ctx.prefetch.fs_prefetch_rule_count() > 0 && blob_table_size > 0 {
+            if fs_prefetch_rule_count > 0 && blob_table_size > 0 {
                 // Prefetch table is very close to blob devices table
                 let offset = blob_table_offset + blob_table_size;
                 // Each prefetched file has is nid of `u32` filled into prefetch table.
-                let size = ctx.prefetch.fs_prefetch_rule_count() * size_of::<u32>() as u32;
+                let size = fs_prefetch_rule_count * size_of::<u32>() as u32;
                 trace!("prefetch table locates at offset {} size {}", offset, size);
                 (offset, size)
             } else {
@@ -679,7 +675,8 @@ impl Bootstrap {
         // When using nid 0 as root nid,
         // the root directory will not be shown by glibc's getdents/readdir.
         // Because in some OS, ino == 0 represents corresponding file is deleted.
-        let orig_meta_addr = bootstrap_ctx.nodes[0].v6_offset - EROFS_BLOCK_SIZE_4096;
+        let root_node_offset = self.tree.lock_node().v6_offset;
+        let orig_meta_addr = root_node_offset - EROFS_BLOCK_SIZE_4096;
         let meta_addr = if blob_table_size > 0 {
             align_offset(
                 blob_table_offset + blob_table_size + prefetch_table_size as u64,
@@ -688,12 +685,8 @@ impl Bootstrap {
         } else {
             orig_meta_addr
         };
-
-        // get devt_slotoff
-        let root_nid = calculate_nid(
-            bootstrap_ctx.nodes[0].v6_offset + (meta_addr - orig_meta_addr),
-            meta_addr,
-        );
+        let meta_offset = meta_addr - orig_meta_addr;
+        let root_nid = calculate_nid(root_node_offset + meta_offset, meta_addr);
 
         // Prepare extended super block
         let mut ext_sb = RafsV6SuperBlockExt::new();
@@ -714,18 +707,20 @@ impl Bootstrap {
         // Dump bootstrap
         timing_tracer!(
             {
-                for node in &mut bootstrap_ctx.nodes {
-                    node.dump_bootstrap_v6(
+                let mut walk_err = Ok(());
+                self.tree.walk_bfs(true, &mut |n| {
+                    let mut node = n.lock().unwrap();
+                    walk_err = node.dump_bootstrap_v6(
                         ctx,
                         bootstrap_ctx.writer.as_mut(),
                         orig_meta_addr,
                         meta_addr,
                         &mut chunk_cache,
-                    )
-                    .context("failed to dump bootstrap")?;
-                }
+                    );
+                    walk_err.is_ok()
+                })?;
 
-                Ok(())
+                walk_err
             },
             "dump_bootstrap",
             Result<()>
@@ -734,9 +729,7 @@ impl Bootstrap {
 
         // `Node` offset might be updated during above inodes dumping. So `get_prefetch_table` after it.
         if prefetch_table_size > 0 {
-            let prefetch_table = ctx
-                .prefetch
-                .get_v6_prefetch_table(&bootstrap_ctx.nodes, meta_addr);
+            let prefetch_table = ctx.prefetch.get_v6_prefetch_table(meta_addr);
             if let Some(mut pt) = prefetch_table {
                 assert!(pt.len() * size_of::<u32>() <= prefetch_table_size as usize);
                 // Device slots are very close to extended super block.
@@ -821,7 +814,7 @@ impl Bootstrap {
         if ctx.conversion_type == ConversionType::TarToTarfs {
             sb.set_block_bits(EROFS_BLOCK_BITS_9);
         }
-        sb.set_inos(bootstrap_ctx.nodes.len() as u64);
+        sb.set_inos(bootstrap_ctx.get_next_ino() - 1);
         sb.set_blocks(block_count);
         sb.set_root_nid(root_nid as u16);
         sb.set_meta_addr(meta_addr);

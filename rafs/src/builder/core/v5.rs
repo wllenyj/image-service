@@ -10,7 +10,7 @@ use anyhow::{bail, Context, Result};
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{div_round_up, root_tracer, timing_tracer, try_round_up_4k};
 
-use super::bootstrap::STARGZ_DEFAULT_BLOCK_SIZE;
+use super::super::stargz::STARGZ_DEFAULT_BLOCK_SIZE;
 use super::node::Node;
 use crate::builder::{Bootstrap, BootstrapContext, BuildContext, ConversionType, Tree};
 use crate::metadata::inode::InodeWrapper;
@@ -38,8 +38,6 @@ impl Node {
         ctx: &mut BuildContext,
         f_bootstrap: &mut dyn RafsIoWrite,
     ) -> Result<()> {
-        debug!("[{}]\t{}", self.overlay, self);
-
         if let InodeWrapper::V5(raw_inode) = &self.inode {
             // Dump inode info
             let name = self.name();
@@ -94,7 +92,7 @@ impl Node {
 
         let mut d_size = 0u64;
         for child in children.iter() {
-            d_size += child.node.inode.name_size() as u64 + RAFS_V5_VIRTUAL_ENTRY_SIZE;
+            d_size += child.lock_node().inode.name_size() as u64 + RAFS_V5_VIRTUAL_ENTRY_SIZE;
         }
         if d_size == 0 {
             self.inode.set_size(4096);
@@ -125,28 +123,17 @@ impl Node {
 
 impl Bootstrap {
     /// Calculate inode digest for directory.
-    fn v5_digest_node(
-        &self,
-        ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
-        index: usize,
-    ) {
-        let node = &bootstrap_ctx.nodes[index];
+    fn v5_digest_node(&self, ctx: &mut BuildContext, tree: &Tree) {
+        let mut node = tree.lock_node();
 
         // We have set digest for non-directory inode in the previous dump_blob workflow.
         if node.is_dir() {
-            let child_index = node.inode.child_index();
-            let child_count = node.inode.child_count();
             let mut inode_hasher = RafsDigest::hasher(ctx.digester);
-
-            for idx in child_index..child_index + child_count {
-                let child = &bootstrap_ctx.nodes[(idx - 1) as usize];
+            for child in tree.children.iter() {
+                let child = child.lock_node();
                 inode_hasher.digest_update(child.inode.digest().as_ref());
             }
-
-            bootstrap_ctx.nodes[index]
-                .inode
-                .set_digest(inode_hasher.digest_finalize());
+            node.inode.set_digest(inode_hasher.digest_finalize());
         }
     }
 
@@ -158,24 +145,24 @@ impl Bootstrap {
         blob_table: &RafsV5BlobTable,
     ) -> Result<()> {
         // Set inode digest, use reverse iteration order to reduce repeated digest calculations.
-        for idx in (0..bootstrap_ctx.nodes.len()).rev() {
-            self.v5_digest_node(ctx, bootstrap_ctx, idx);
-        }
+        self.tree.walk_dfs_post(&mut |t| {
+            self.v5_digest_node(ctx, t);
+            true
+        })?;
 
         // Set inode table
         let super_block_size = size_of::<RafsV5SuperBlock>();
-        let inode_table_entries = bootstrap_ctx.nodes.len() as u32;
+        let inode_table_entries = bootstrap_ctx.get_next_ino() as u32 - 1;
         let mut inode_table = RafsV5InodeTable::new(inode_table_entries as usize);
         let inode_table_size = inode_table.size();
 
         // Set prefetch table
-        let (prefetch_table_size, prefetch_table_entries) = if let Some(prefetch_table) =
-            ctx.prefetch.get_v5_prefetch_table(&bootstrap_ctx.nodes)
-        {
-            (prefetch_table.size(), prefetch_table.len() as u32)
-        } else {
-            (0, 0u32)
-        };
+        let (prefetch_table_size, prefetch_table_entries) =
+            if let Some(prefetch_table) = ctx.prefetch.get_v5_prefetch_table() {
+                (prefetch_table.size(), prefetch_table.len() as u32)
+            } else {
+                (0, 0u32)
+            };
 
         // Set blob table, use sha256 string (length 64) as blob id if not specified
         let prefetch_table_offset = super_block_size + inode_table_size;
@@ -215,8 +202,10 @@ impl Bootstrap {
             + extended_blob_table_size) as u32;
 
         let mut has_xattr = false;
-        for node in &mut bootstrap_ctx.nodes {
-            inode_table.set(node.index, inode_offset)?;
+        let mut walk_err = Ok(());
+        self.tree.walk_dfs_pre(&mut |t| {
+            let node = t.lock_node();
+            walk_err = inode_table.set(node.inode.ino(), inode_offset);
             // Add inode size
             inode_offset += node.inode.inode_size() as u32;
             if node.inode.has_xattr() {
@@ -231,7 +220,9 @@ impl Bootstrap {
             if node.is_reg() {
                 inode_offset += node.inode.child_count() * size_of::<RafsV5ChunkInfo>() as u32;
             }
-        }
+            walk_err.is_ok()
+        })?;
+        walk_err?;
         if has_xattr {
             super_block.set_has_xattr();
         }
@@ -247,7 +238,7 @@ impl Bootstrap {
             .context("failed to store inode table")?;
 
         // Dump prefetch table
-        if let Some(mut prefetch_table) = ctx.prefetch.get_v5_prefetch_table(&bootstrap_ctx.nodes) {
+        if let Some(mut prefetch_table) = ctx.prefetch.get_v5_prefetch_table() {
             prefetch_table
                 .store(bootstrap_ctx.writer.as_mut())
                 .context("failed to store prefetch table")?;
@@ -266,15 +257,20 @@ impl Bootstrap {
         // Dump inodes and chunks
         timing_tracer!(
             {
-                for node in &bootstrap_ctx.nodes {
-                    node.dump_bootstrap_v5(ctx, bootstrap_ctx.writer.as_mut())
-                        .context("failed to dump bootstrap")?;
-                }
-
-                Ok(())
+                let mut walk_err = Ok(());
+                self.tree.walk_dfs(
+                    &mut |t| {
+                        let node = t.lock_node();
+                        walk_err = node
+                            .dump_bootstrap_v5(ctx, bootstrap_ctx.writer.as_mut())
+                            .context("failed to dump bootstrap");
+                        walk_err.is_ok()
+                    },
+                    &mut |_t| true,
+                )?;
+                walk_err
             },
-            "dump_bootstrap",
-            Result<()>
+            "dump_bootstrap"
         )?;
 
         Ok(())

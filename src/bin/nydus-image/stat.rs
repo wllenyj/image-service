@@ -170,7 +170,8 @@ impl ImageStat {
             &mut self.target_image
         };
 
-        tree.iterate(&mut |node| {
+        let pre = &mut |t: &Tree| -> bool {
+            let node = t.lock_node();
             if node.is_reg() {
                 image.files += 1;
                 if node.is_hardlink() {
@@ -203,7 +204,8 @@ impl ImageStat {
                 image.symlinks += 1;
             }
             true
-        })?;
+        };
+        tree.walk_dfs_pre(pre)?;
 
         if is_base {
             for entry in dict.hashmap().values() {

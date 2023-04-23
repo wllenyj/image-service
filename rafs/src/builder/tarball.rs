@@ -271,7 +271,7 @@ impl<'a> TarballTreeBuilder<'a> {
 
         // Handle hardlink ino
         let mut hardlink_target = None;
-        if entry_type.is_hard_link() {
+        let ino = if entry_type.is_hard_link() {
             let link_path = entry
                 .link_name()
                 .context("tarball: failed to get target path for tar symlink entry")?
@@ -293,7 +293,8 @@ impl<'a> TarballTreeBuilder<'a> {
                     }
                 }
             }
-            if !tmp_tree.node.is_reg() {
+            let mut tmp_node = tmp_tree.lock_node();
+            if !tmp_node.is_reg() {
                 bail!(
                     "tarball: target {} for hardlink {} is not a regular file",
                     link_path.display(),
@@ -302,7 +303,11 @@ impl<'a> TarballTreeBuilder<'a> {
             }
             hardlink_target = Some(tmp_tree);
             flags |= RafsInodeFlags::HARDLINK;
-        }
+            tmp_node.inode.set_has_hardlink(true);
+            tmp_node.inode.ino()
+        } else {
+            self.next_ino()
+        };
 
         // Parse xattrs
         let mut xattrs = RafsXAttrs::new();
@@ -327,11 +332,6 @@ impl<'a> TarballTreeBuilder<'a> {
             }
         }
 
-        let ino = if let Some(t) = hardlink_target {
-            t.node.inode.ino()
-        } else {
-            self.next_ino()
-        };
         let mut inode = match self.ctx.fs_version {
             RafsVersion::V5 => InodeWrapper::V5(RafsV5Inode {
                 i_digest: RafsDigest::default(),
@@ -393,7 +393,6 @@ impl<'a> TarballTreeBuilder<'a> {
         };
         let mut node = Node {
             info: Arc::new(info),
-            index: 0,
             overlay: Overlay::UpperAddition,
             inode,
             chunks: Vec::new(),
@@ -409,7 +408,7 @@ impl<'a> TarballTreeBuilder<'a> {
         // Tar hardlink header has zero file size and no file data associated, so copy value from
         // the associated regular file.
         if let Some(t) = hardlink_target {
-            let n = &t.node;
+            let n = t.lock_node();
             if n.inode.is_v5() {
                 node.inode.set_digest(n.inode.digest().to_owned());
             }
@@ -442,14 +441,14 @@ impl<'a> TarballTreeBuilder<'a> {
         if target_paths_len == 1 {
             // Handle root node modification
             assert_eq!(node.path(), Path::new("/"));
-            tree.node = node;
+            tree.set_node(node);
         } else {
             let mut tmp_tree = tree;
             for idx in 1..target_paths.len() {
                 match tmp_tree.get_child_idx(&target_paths[idx]) {
                     Some(i) => {
                         if idx == target_paths_len - 1 {
-                            tmp_tree.children[i].node = node;
+                            tmp_tree.children[i].set_node(node);
                             break;
                         } else {
                             tmp_tree = &mut tmp_tree.children[i];
@@ -563,7 +562,6 @@ impl<'a> TarballTreeBuilder<'a> {
         };
         let node = Node {
             info: Arc::new(info),
-            index: 0,
             overlay: Overlay::UpperAddition,
             inode,
             chunks: Vec::new(),
@@ -582,7 +580,8 @@ impl<'a> TarballTreeBuilder<'a> {
         for c in &mut tree.children {
             Self::set_v5_dir_size(c);
         }
-        tree.node.v5_set_dir_size(RafsVersion::V5, &tree.children);
+        let mut node = tree.lock_node();
+        node.v5_set_dir_size(RafsVersion::V5, &tree.children);
     }
 
     // Filter out special files of estargz.
@@ -661,7 +660,7 @@ impl Builder for TarballBuilder {
 
         // Dump blob file
         timing_tracer!(
-            { Blob::dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut blob_writer) },
+            { Blob::dump(ctx, &bootstrap.tree, blob_mgr, &mut blob_writer) },
             "dump_blob"
         )?;
 
