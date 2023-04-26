@@ -43,14 +43,14 @@ impl<'a> Read for FileRangeReader<'a> {
     }
 }
 
-struct BufReaderState<R: Read> {
+struct BufReaderState<R> {
     reader: BufReader<R>,
     pos: u64,
     hash: Sha256,
 }
 
 /// A wrapper over `BufReader` to track current position.
-pub struct BufReaderInfo<R: Read> {
+pub struct BufReaderInfo<R> {
     calc_digest: bool,
     state: Arc<Mutex<BufReaderState<R>>>,
 }
@@ -93,6 +93,16 @@ impl<R: Read> Read for BufReaderInfo<R> {
             if v > 0 && self.calc_digest {
                 state.hash.digest_update(&buf[..v]);
             }
+            v
+        })
+    }
+}
+
+impl<S: std::io::Seek> std::io::Seek for BufReaderInfo<S> {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        let mut state = self.state.lock().unwrap();
+        state.reader.seek(pos).map(|v| {
+            state.pos += v as u64;
             v
         })
     }

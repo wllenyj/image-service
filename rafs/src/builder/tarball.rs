@@ -15,12 +15,15 @@
 //! -- optionally dump file data associated with the tar header into RAFS data blob
 //! - arrange all generated RAFS nodes into a RAFS filesystem tree
 //! - dump the RAFS filesystem tree into RAFS metadata blob
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use tar::{Archive, Entry, EntryType, Header};
@@ -47,6 +50,14 @@ use crate::metadata::layout::v5::RafsV5Inode;
 use crate::metadata::layout::RafsXAttrs;
 use crate::metadata::{Inode, RafsVersion};
 
+thread_local! {
+    static RECORD: RefCell<HashMap<&'static str, Duration>> = RefCell::new(HashMap::from([
+            ("next", Duration::default()),
+            ("get_idx", Duration::default()),
+            ("dump", Duration::default()),
+    ]));
+}
+
 enum TarReader {
     File(File),
     Buf(BufReaderInfo<File>),
@@ -61,6 +72,18 @@ impl Read for TarReader {
             TarReader::Buf(b) => b.read(buf),
             TarReader::TarGz(f) => f.read(buf),
             TarReader::Zran(f) => f.read(buf),
+        }
+    }
+}
+
+impl std::io::Seek for TarReader {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        match self {
+            TarReader::File(f) => f.seek(pos),
+            TarReader::Buf(b) => b.seek(pos),
+            TarReader::TarGz(_) | TarReader::Zran(_) => {
+                unimplemented!();
+            }
         }
     }
 }
@@ -161,17 +184,26 @@ impl<'a> TarballTreeBuilder<'a> {
 
         // Generate RAFS node for each tar entry, and optionally adding missing parents.
         let entries = tar
-            .entries()
+            .entries_with_seek()
             .context("tarball: failed to read entries from tar")?;
-        for entry in entries {
-            let mut entry = entry.context("tarball: failed to read entry from tar")?;
-            let path = entry
-                .path()
-                .context("tarball: failed to to get path from tar entry")?;
-            let path = PathBuf::from("/").join(path);
-            let path = path.components().as_path();
-            if !self.is_special_files(path) {
-                self.parse_entry(&mut tree, &mut entry, path)?;
+        //for entry in entries {
+        let mut iter = entries.into_iter();
+        loop {
+            let start = std::time::Instant::now();
+            let entry = iter.next();
+            RECORD.with(|r| *r.borrow_mut().get_mut("next").unwrap() += start.elapsed());
+            if let Some(entry) = entry {
+                let mut entry = entry.context("tarball: failed to read entry from tar")?;
+                let path = entry
+                    .path()
+                    .context("tarball: failed to to get path from tar entry")?;
+                let path = PathBuf::from("/").join(path);
+                let path = path.components().as_path();
+                if !self.is_special_files(path) {
+                    self.parse_entry(&mut tree, &mut entry, path)?;
+                }
+            } else {
+                break;
             }
         }
 
@@ -179,6 +211,14 @@ impl<'a> TarballTreeBuilder<'a> {
         if self.ctx.fs_version.is_v5() {
             Self::set_v5_dir_size(&mut tree);
         }
+        RECORD.with(|r| {
+            println!(
+                "build tree: next: {:?}, get_idx: {:?}, dump: {:?}",
+                r.borrow().get("next").unwrap(),
+                r.borrow().get("get_idx").unwrap(),
+                r.borrow().get("dump").unwrap(),
+            );
+        });
 
         Ok(tree)
     }
@@ -282,7 +322,11 @@ impl<'a> TarballTreeBuilder<'a> {
             assert!(!targets.is_empty());
             let mut tmp_tree: &Tree = tree;
             for name in &targets[1..] {
-                match tmp_tree.get_child_idx(name.as_bytes()) {
+                //match tmp_tree.get_child_idx(name.as_bytes()) {
+                let start = std::time::Instant::now();
+                let ch_idx = tmp_tree.get_child_idx(name.as_bytes());
+                RECORD.with(|r| *r.borrow_mut().get_mut("get_idx").unwrap() += start.elapsed());
+                match ch_idx {
                     Some(idx) => tmp_tree = &tmp_tree.children[idx],
                     None => {
                         bail!(
@@ -417,13 +461,15 @@ impl<'a> TarballTreeBuilder<'a> {
             node.chunks = n.chunks.clone();
             node.set_xattr(n.info.xattrs.clone());
         } else {
-            node.dump_node_data_with_reader(
-                self.ctx,
-                self.blob_mgr,
-                self.blob_writer,
-                Some(entry),
-                &mut self.buf,
-            )?;
+            let start = std::time::Instant::now();
+            //node.dump_node_data_with_reader(
+            //    self.ctx,
+            //    self.blob_mgr,
+            //    self.blob_writer,
+            //    Some(entry),
+            //    &mut self.buf,
+            //)?;
+            RECORD.with(|r| *r.borrow_mut().get_mut("dump").unwrap() += start.elapsed());
         }
 
         // Update inode.i_blocks for RAFS v5.
@@ -445,7 +491,11 @@ impl<'a> TarballTreeBuilder<'a> {
         } else {
             let mut tmp_tree = tree;
             for idx in 1..target_paths.len() {
-                match tmp_tree.get_child_idx(target_paths[idx].as_bytes()) {
+                //match tmp_tree.get_child_idx(target_paths[idx].as_bytes()) {
+                let start = std::time::Instant::now();
+                let ch_idx = tmp_tree.get_child_idx(target_paths[idx].as_bytes());
+                RECORD.with(|r| *r.borrow_mut().get_mut("get_idx").unwrap() += start.elapsed());
+                match ch_idx {
                     Some(i) => {
                         if idx == target_paths_len - 1 {
                             tmp_tree.children[i].set_node(node);

@@ -90,7 +90,7 @@ impl Bootstrap {
         if parent_node.is_dir() {
             // Sort children list by name, so that we can improve performance in fs read_dir using
             // binary search.
-            warn!("build rafs sort");
+            //warn!("build rafs sort");
             tree.children.sort_by_key(|child| child.name().to_owned());
             parent_node
                 .inode
